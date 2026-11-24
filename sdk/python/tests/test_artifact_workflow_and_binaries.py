@@ -1352,6 +1352,114 @@ def test_explicit_codex_bin_override_takes_priority(tmp_path: Path) -> None:
     assert client_module.resolve_codex_bin(config, ops) == explicit_binary
 
 
+@pytest.mark.parametrize(
+    ("configured_path", "relative_target"),
+    [
+        ("target/debug/codex", Path("target/debug/codex")),
+        ("./codex", Path("codex")),
+    ],
+)
+def test_relative_codex_bin_resolves_to_absolute_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    configured_path: str,
+    relative_target: Path,
+) -> None:
+    from openai_codex import client as client_module
+
+    target = tmp_path / relative_target
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("")
+    monkeypatch.chdir(tmp_path)
+
+    resolved = client_module._resolve_codex_bin(
+        client_module.CodexConfig(codex_bin=configured_path)
+    )
+    assert resolved.is_absolute()
+    assert resolved == Path.cwd() / relative_target
+
+
+def _write_codex_launch_stub(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if os.name == "nt":
+        path.write_text('@echo off\r\n> "%CODEX_TEST_MARKER%" echo %CD%\r\nexit /b 0\r\n')
+    else:
+        path.write_text('#!/bin/sh\nprintf "%s\\n" "$PWD" > "$CODEX_TEST_MARKER"\nexit 0\n')
+        path.chmod(0o755)
+
+
+def test_client_start_launches_relative_codex_bin_with_different_cwd(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from openai_codex import client as client_module
+
+    stub_name = "codex.cmd" if os.name == "nt" else "codex"
+    stub_rel = f"target/debug/{stub_name}"
+    stub = tmp_path / "target" / "debug" / stub_name
+    _write_codex_launch_stub(stub)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    marker = tmp_path / "launched-cwd.txt"
+
+    monkeypatch.chdir(tmp_path)
+    client = client_module.CodexClient(
+        client_module.CodexConfig(
+            codex_bin=stub_rel,
+            cwd=str(workspace),
+            env={"CODEX_TEST_MARKER": str(marker)},
+        )
+    )
+    try:
+        client.start()
+        assert client._proc is not None
+        assert client._proc.wait(timeout=5) == 0
+        assert client._checkout_capabilities is not None
+        assert client._checkout_capabilities.command[0] == str(
+            Path.cwd() / "target" / "debug" / stub_name
+        )
+    finally:
+        client.close()
+
+    assert Path(marker.read_text().strip()).resolve() == workspace.resolve()
+
+
+def test_client_start_launches_dot_slash_codex_bin_not_in_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from openai_codex import client as client_module
+
+    stub_name = "codex.cmd" if os.name == "nt" else "codex"
+    stub = tmp_path / stub_name
+    _write_codex_launch_stub(stub)
+    marker = tmp_path / "launched-local.txt"
+    empty_path_dir = tmp_path / "empty-bin"
+    empty_path_dir.mkdir()
+
+    env = {"CODEX_TEST_MARKER": str(marker)}
+    if os.name != "nt":
+        env["PATH"] = str(empty_path_dir)
+
+    monkeypatch.chdir(tmp_path)
+    client = client_module.CodexClient(
+        client_module.CodexConfig(
+            codex_bin=f"./{stub_name}",
+            env=env,
+        )
+    )
+    try:
+        client.start()
+        assert client._proc is not None
+        assert client._proc.wait(timeout=5) == 0
+        assert client._checkout_capabilities is not None
+        assert client._checkout_capabilities.command[0] == str(Path.cwd() / stub_name)
+    finally:
+        client.close()
+
+    assert Path(marker.read_text().strip()).resolve() == tmp_path.resolve()
+
+
 def test_missing_runtime_package_requires_explicit_codex_bin() -> None:
     from openai_codex import client as client_module
 

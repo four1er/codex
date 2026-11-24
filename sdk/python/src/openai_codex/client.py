@@ -183,7 +183,7 @@ def resolve_codex_bin(config: "CodexConfig", ops: CodexBinResolverOps) -> Path:
                 f"Codex binary not found at {codex_bin}. Set CodexConfig.codex_bin "
                 "to a valid binary path."
             )
-        return codex_bin
+        return codex_bin.absolute()
 
     return ops.installed_codex_path()
 
