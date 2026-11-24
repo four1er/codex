@@ -1,3 +1,13 @@
+/// Normalize a character for case-insensitive matching.
+///
+/// Uses per-character lowercasing on both haystack and needle so contextual
+/// string-level rules (such as Greek final sigma `Σ` → `ς`) never diverge
+/// between the two, and folds final sigma (`ς`) to medial sigma (`σ`) so all
+/// three Greek sigma variants (`Σ`/`σ`/`ς`) match consistently.
+fn fold_char(ch: char) -> impl Iterator<Item = char> {
+    ch.to_lowercase().map(|lc| if lc == 'ς' { 'σ' } else { lc })
+}
+
 /// Simple case-insensitive subsequence matcher used for fuzzy filtering.
 ///
 /// Returns the indices (character positions) of the matched characters in the
@@ -17,13 +27,13 @@ pub fn fuzzy_match(haystack: &str, needle: &str) -> Option<(Vec<usize>, i32)> {
     let mut lowered_chars: Vec<char> = Vec::new();
     let mut lowered_to_orig_char_idx: Vec<usize> = Vec::new();
     for (orig_idx, ch) in haystack.chars().enumerate() {
-        for lc in ch.to_lowercase() {
+        for lc in fold_char(ch) {
             lowered_chars.push(lc);
             lowered_to_orig_char_idx.push(orig_idx);
         }
     }
 
-    let lowered_needle: Vec<char> = needle.to_lowercase().chars().collect();
+    let lowered_needle: Vec<char> = needle.chars().flat_map(fold_char).collect();
 
     let mut result_orig_indices: Vec<usize> = Vec::with_capacity(lowered_needle.len());
     let mut first_lower_pos: Option<usize> = None;
@@ -159,5 +169,30 @@ mod tests {
         assert_eq!(idx, vec![0]);
         // Lowercasing 'İ' expands to two chars; contiguous prefix -> window 0 with bonus
         assert_eq!(score, -100);
+    }
+
+    #[test]
+    fn exact_greek_uppercase_query_matches() {
+        assert_eq!(fuzzy_match("ΟΣ", "ΟΣ"), Some((vec![0, 1], -100)));
+    }
+
+    #[test]
+    fn greek_sigma_variants_match_consistently() {
+        for haystack in ["ΟΣ", "οσ", "ος"] {
+            for needle in ["ΟΣ", "οσ", "ος"] {
+                assert_eq!(
+                    fuzzy_match(haystack, needle),
+                    Some((vec![0, 1], -100)),
+                    "expected {needle:?} to match {haystack:?}"
+                );
+            }
+        }
+        // Prefix query with trailing uppercase sigma matches medial sigma in longer word.
+        assert_eq!(fuzzy_match("ΟΣΑ", "ΟΣ"), Some((vec![0, 1], -100)));
+        assert_eq!(fuzzy_match("οσα", "ΟΣ"), Some((vec![0, 1], -100)));
+        // Single-char sigma variants match final sigma in haystack.
+        assert_eq!(fuzzy_match("ος", "Σ"), Some((vec![1], 0)));
+        assert_eq!(fuzzy_match("ος", "σ"), Some((vec![1], 0)));
+        assert_eq!(fuzzy_match("ος", "ς"), Some((vec![1], 0)));
     }
 }
