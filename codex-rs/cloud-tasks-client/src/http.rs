@@ -879,12 +879,8 @@ mod api {
         has_dash_headers && has_hunk
     }
 
-    fn tail(s: &str, max: usize) -> String {
-        if s.len() <= max {
-            s.to_string()
-        } else {
-            s[s.len() - max..].to_string()
-        }
+    pub(super) fn tail(s: &str, max: usize) -> String {
+        crate::slice_to_char_boundary(s, max, crate::SliceEnd::Suffix).to_string()
     }
 
     fn summarize_patch_for_logging(patch: &str) -> String {
@@ -925,5 +921,75 @@ fn append_error_log(message: &str) {
     {
         use std::io::Write as _;
         let _ = writeln!(f, "[{ts}] {message}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::api::tail;
+
+    #[test]
+    fn tail_handles_reporter_repro_split_multibyte_char() {
+        let stderr = format!("é{}", "a".repeat(1999));
+        assert_eq!(stderr.len(), 2001);
+
+        let result = tail(&stderr, /*max*/ 2000);
+        assert_eq!(result, "a".repeat(1999));
+        assert!(result.len() <= 2000);
+    }
+
+    #[test]
+    fn tail_handles_three_and_four_byte_chars_at_cut() {
+        let three_byte = format!("あ{}", "a".repeat(1999));
+        assert_eq!(tail(&three_byte, /*max*/ 2000), "a".repeat(1999));
+
+        let four_byte = format!("🦀{}", "a".repeat(1999));
+        assert_eq!(tail(&four_byte, /*max*/ 2000), "a".repeat(1999));
+    }
+
+    #[test]
+    fn tail_keeps_ascii_unchanged_or_exact_suffix() {
+        assert_eq!(tail("hello", /*max*/ 2000), "hello");
+
+        let exact = "a".repeat(2000);
+        assert_eq!(tail(&exact, /*max*/ 2000), exact);
+
+        assert_eq!(tail("abcdef", /*max*/ 4), "cdef");
+    }
+
+    #[test]
+    fn tail_handles_empty_and_short_strings() {
+        assert_eq!(tail("", /*max*/ 2000), "");
+        assert_eq!(tail("", /*max*/ 0), "");
+        assert_eq!(tail("é", /*max*/ 2000), "é");
+        assert_eq!(tail("é", /*max*/ 1), "");
+        assert_eq!(tail("abc", /*max*/ 0), "");
+    }
+
+    #[test]
+    fn tail_cuts_exactly_on_char_boundary() {
+        let exact_after_multibyte = format!("é{}", "a".repeat(2000));
+        assert_eq!(exact_after_multibyte.len(), 2002);
+        assert_eq!(tail(&exact_after_multibyte, /*max*/ 2000), "a".repeat(2000));
+
+        let exact_between_multibyte = format!("éé{}", "a".repeat(1998));
+        assert_eq!(exact_between_multibyte.len(), 2002);
+        assert_eq!(
+            tail(&exact_between_multibyte, /*max*/ 2000),
+            format!("é{}", "a".repeat(1998))
+        );
+    }
+
+    #[test]
+    fn tail_keeps_multibyte_char_at_start_of_kept_tail() {
+        assert_eq!(tail("aé", /*max*/ 2), "é");
+        assert_eq!(tail("a🦀", /*max*/ 4), "🦀");
+
+        let boundary_start = format!("aé{}", "b".repeat(1998));
+        assert_eq!(boundary_start.len(), 2001);
+        assert_eq!(
+            tail(&boundary_start, /*max*/ 2000),
+            format!("é{}", "b".repeat(1998))
+        );
     }
 }

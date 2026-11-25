@@ -22,7 +22,9 @@ use crate::app::App;
 use crate::app::AttemptView;
 use crate::util::format_relative_time_now;
 use codex_cloud_tasks_client::AttemptStatus;
+use codex_cloud_tasks_client::SliceEnd;
 use codex_cloud_tasks_client::TaskStatus;
+use codex_cloud_tasks_client::slice_to_char_boundary;
 use codex_tui::render_markdown_text;
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
@@ -297,12 +299,15 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &mut App) {
     }
 
     // Bottom row: status/log text across full width (single-line; sanitize newlines)
-    let mut status_line = app.status.replace('\n', " ");
-    if status_line.len() > 2000 {
+    let raw_status = app.status.replace('\n', " ");
+    let status_line = if raw_status.len() > 2000 {
         // hard cap to avoid TUI noise
-        status_line.truncate(2000);
-        status_line.push('…');
-    }
+        let truncated =
+            slice_to_char_boundary(&raw_status, /*max_bytes*/ 2000, SliceEnd::Prefix);
+        format!("{truncated}…")
+    } else {
+        raw_status
+    };
     // Clear the status row to avoid trailing characters when the message shrinks.
     frame.render_widget(Clear, rows[1]);
     let status = Paragraph::new(status_line);
@@ -1043,4 +1048,92 @@ pub fn draw_best_of_modal(frame: &mut Frame, area: Rect, app: &mut App) {
         .highlight_style(Style::default().bold())
         .block(Block::default().borders(Borders::NONE));
     frame.render_stateful_widget(list, rows[1], &mut list_state);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use unicode_width::UnicodeWidthStr;
+
+    fn render_footer_status(status: &str) -> String {
+        let backend = TestBackend::new(2010, 2);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut app = App::new();
+        app.status = status.to_string();
+        terminal
+            .draw(|frame| draw_footer(frame, frame.area(), &mut app))
+            .expect("draw_footer");
+        let buf = terminal.backend().buffer();
+        let mut line = String::new();
+        let mut x = 0u16;
+        while x < buf.area.width {
+            let sym = buf[(x, 1)].symbol();
+            line.push_str(sym);
+            let width = sym.width().max(1) as u16;
+            x = x.saturating_add(width);
+        }
+        line.trim_end().to_string()
+    }
+
+    #[test]
+    fn draw_footer_handles_multibyte_char_crossing_2000_byte_cap() {
+        let status = format!("{}é", "a".repeat(1999));
+        assert_eq!(status.len(), 2001);
+
+        let rendered = render_footer_status(&status);
+        assert_eq!(rendered, format!("{}…", "a".repeat(1999)));
+
+        let status_three_byte = format!("{}あ", "a".repeat(1999));
+        assert_eq!(
+            render_footer_status(&status_three_byte),
+            format!("{}…", "a".repeat(1999))
+        );
+
+        let status_four_byte = format!("{}🦀", "a".repeat(1998));
+        assert_eq!(
+            render_footer_status(&status_four_byte),
+            format!("{}…", "a".repeat(1998))
+        );
+    }
+
+    #[test]
+    fn draw_footer_preserves_ascii_and_truncates_over_cap() {
+        assert_eq!(render_footer_status("Task ready"), "Task ready");
+
+        let exact = "a".repeat(2000);
+        assert_eq!(render_footer_status(&exact), exact);
+
+        let over = "a".repeat(2005);
+        assert_eq!(
+            render_footer_status(&over),
+            format!("{}…", "a".repeat(2000))
+        );
+    }
+
+    #[test]
+    fn draw_footer_handles_empty_short_and_newlines() {
+        assert_eq!(render_footer_status(""), "");
+        assert_eq!(render_footer_status("é"), "é");
+        assert_eq!(render_footer_status("line1\nline2"), "line1 line2");
+    }
+
+    #[test]
+    fn draw_footer_cuts_exactly_on_char_boundary() {
+        let before_multibyte = format!("{}é", "a".repeat(2000));
+        assert_eq!(before_multibyte.len(), 2002);
+        assert_eq!(
+            render_footer_status(&before_multibyte),
+            format!("{}…", "a".repeat(2000))
+        );
+
+        let after_multibyte = format!("{}éa", "a".repeat(1998));
+        assert_eq!(after_multibyte.len(), 2001);
+        assert_eq!(
+            render_footer_status(&after_multibyte),
+            format!("{}é…", "a".repeat(1998))
+        );
+    }
 }
